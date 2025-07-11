@@ -201,7 +201,7 @@ export const attachListeners = (
     setReadyState(ReadyState.CLOSING);
     cancelReconnectOnClose();
     cancelReconnectOnError();
-    webSocketInstance.close();
+    webSocketInstance.close(1000, "Client closed manually");
     if (interval) clearInterval(interval);
   };
 };

@@ -28,7 +28,8 @@ const cleanSubscribers = (
             setReadyState(ReadyState.CLOSED);
           };
         }
-        socketLike.close();
+        console.log("close socket inremoveSubscriber");
+        socketLike.close(1000, "Client closed manually");
       } catch (e) {
 
       }
