@@ -747,3 +747,131 @@ test.each([false, true])('Options#heartbeat, can handle case when interval is ve
 );
 
 // //TODO: Write companion tests for useSocketIO
+
+test('a socket created while its effect is being cleaned up is closed', async () => {
+  // connect turns false while the url resolves. The hook learns about it only
+  // in the render that the socket creation triggers with flushSync to report
+  // CONNECTING, and that render cleans the effect up before the cleanup has
+  // a handle on the new socket.
+  let connectNow = true;
+  const getUrl = () => new Promise<string>(resolve => {
+    setTimeout(() => {
+      connectNow = false;
+      resolve(URL);
+    }, 100);
+  });
+
+  const { result } = renderHook(() => useWebSocket(getUrl, options, connectNow));
+
+  await sleep(500);
+
+  const ws = result.current.getWebSocket();
+  expect(ws).not.toBeNull();
+  expect(ws?.readyState).toBe(ReadyState.CLOSED);
+});
+
+test('a failing url is retried for as long as the hook should connect', async () => {
+  let failures = 5;
+  const getUrl = jest.fn(() => new Promise<string>((resolve, reject) => {
+    if (failures > 0) {
+      failures--;
+      reject(new Error('No ticket'));
+    } else {
+      resolve(URL);
+    }
+  }));
+  options.retryOnError = true;
+  options.reconnectAttempts = Infinity;
+  options.reconnectInterval = 50;
+
+  const { result } = renderHook(() => useWebSocket(getUrl, options));
+
+  await server.connected;
+  await waitFor(() => expect(result.current.readyState).toBe(ReadyState.OPEN));
+  expect(getUrl).toHaveBeenCalledTimes(6);
+});
+
+test('a failing url is not requested again after unmount', async () => {
+  const getUrl = jest.fn(() => Promise.reject<string>(new Error('No ticket')));
+  options.retryOnError = true;
+  options.reconnectAttempts = Infinity;
+  options.reconnectInterval = 50;
+
+  const { unmount } = renderHook(() => useWebSocket(getUrl, options));
+
+  await sleep(200);
+  unmount();
+  const callsAtUnmount = getUrl.mock.calls.length;
+  await sleep(300);
+
+  expect(callsAtUnmount).toBeGreaterThan(1);
+  expect(getUrl).toHaveBeenCalledTimes(callsAtUnmount);
+});
+
+test('an attempt that resolves after a newer one does not take over readyState', async () => {
+  let calls = 0;
+  const getUrl = () => {
+    calls++;
+    const isStale = calls === 1;
+    return new Promise<string>(resolve => {
+      setTimeout(() => resolve(isStale ? `${URL}/stale` : URL), isStale ? 400 : 50);
+    });
+  };
+
+  const {
+    result,
+    rerender,
+  } = renderHook(({ connect }) => useWebSocket(getUrl, options, connect), {
+    initialProps: { connect: true },
+  });
+
+  rerender({ connect: false });
+  rerender({ connect: true });
+
+  await server.connected;
+  await waitFor(() => expect(result.current.readyState).toBe(ReadyState.OPEN));
+
+  // The first, cancelled attempt resolves now; any later render must still
+  // read the state of the live socket.
+  await sleep(500);
+  rerender({ connect: true });
+
+  expect(result.current.readyState).toBe(ReadyState.OPEN);
+});
+
+test('the hook closes its socket with a normal closure code', async () => {
+  const { result, unmount } = renderHook(() => useWebSocket(URL, options));
+  await server.connected;
+  const ws = result.current.getWebSocket() as WebSocket;
+  const close = jest.spyOn(ws, 'close');
+
+  unmount();
+
+  expect(close).toHaveBeenCalledWith(1000);
+});
+
+test('a closing code that browsers reject falls back to a normal closure', async () => {
+  options.defaulClosingCode = 1001;
+
+  const { result, unmount } = renderHook(() => useWebSocket(URL, options));
+  await server.connected;
+  const ws = result.current.getWebSocket() as WebSocket;
+  const close = jest.spyOn(ws, 'close');
+
+  unmount();
+
+  expect(close).toHaveBeenCalledWith(1000);
+});
+
+test('an application closing code is passed through', async () => {
+  options.defaulClosingCode = 4001;
+
+  const { result, unmount } = renderHook(() => useWebSocket(URL, options));
+  await server.connected;
+  const ws = result.current.getWebSocket() as WebSocket;
+  const close = jest.spyOn(ws, 'close');
+
+  unmount();
+
+  expect(close).toHaveBeenCalledWith(4001);
+});

@@ -9,6 +9,7 @@ import {
   removeSubscriber,
   hasSubscribers,
 } from "./manage-subscribers";
+import { closeWebSocket } from "./util";
 
 //TODO ensure that all onClose callbacks are called
 
@@ -32,7 +33,7 @@ const cleanSubscribers = (
             setReadyState(ReadyState.CLOSED);
           };
         }
-        socketLike.close(optionsRef.current.defaulClosingCode);
+        closeWebSocket(socketLike, optionsRef.current.defaulClosingCode);
       } catch (e) {}
       if (clearSocketIoPingInterval) clearSocketIoPingInterval();
 
