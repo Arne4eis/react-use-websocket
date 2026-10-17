@@ -737,9 +737,12 @@ test.each([false, true])('Options#heartbeat, can handle case when interval is ve
   await sleep(50);
   expect(result.current.lastMessage?.data).toEqual("authorized");
 
-  await sleep(850);
-  // it does not matter is it shared mode or not, in both cases only one timer is used that means only one ping message is sent for all subscribers
-  expect(server.messages).toEqual(["token", "ping"]);
+  // The heartbeat checks every 100 ms, so the ping goes out between 800 and
+  // 900 ms after the last message: wait for it instead of guessing the moment.
+  await waitFor(() => {
+    // it does not matter is it shared mode or not, in both cases only one timer is used that means only one ping message is sent for all subscribers
+    expect(server.messages).toEqual(["token", "ping"]);
+  }, { timeout: 1500 });
   server.send("pong");
 
   expect(result.current.readyState).toBe(WebSocket.OPEN);
