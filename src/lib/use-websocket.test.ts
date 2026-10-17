@@ -137,9 +137,11 @@ test('a function-promise based url stops retrying if it has exceeded reconnectAt
 
   expect(result.current.readyState).toEqual(ReadyState.UNINSTANTIATED);
   rerender({ initialValue: true });
-  await sleep(1000);
+  // Retries fail at about 500 and 1000 ms: check in between, not at the
+  // moment the last one gives up.
+  await sleep(700);
   expect(result.current.readyState).toEqual(ReadyState.CONNECTING);
-  await sleep(1000);
+  await sleep(1300);
   await expect(result.current.readyState).toEqual(ReadyState.CLOSED);
   expect(options.onReconnectStop).toHaveBeenCalled();
 });
@@ -333,7 +335,11 @@ test('shared=false websocket can re-connect after timeout', async () => {
 
   await server.connected;
   server.send('pong');
-  expect(component1.current.getWebSocket()?.readyState).toBe(WebSocket.OPEN);
+  // Without pongs the heartbeat keeps dropping the connection every 100 ms,
+  // so a single check may land in the middle of a reconnect.
+  await waitFor(() => {
+    expect(component1.current.getWebSocket()?.readyState).toBe(WebSocket.OPEN);
+  });
 });
 
 test('shared=true websocket can re-connect after timeout', async () => {
@@ -360,7 +366,11 @@ test('shared=true websocket can re-connect after timeout', async () => {
 
   await server.connected;
   server.send('pong');
-  expect(component1.current.getWebSocket()?.readyState).toBe(WebSocket.OPEN);
+  // Without pongs the heartbeat keeps dropping the connection every 100 ms,
+  // so a single check may land in the middle of a reconnect.
+  await waitFor(() => {
+    expect(component1.current.getWebSocket()?.readyState).toBe(WebSocket.OPEN);
+  });
 });
 
 test('shared websockets each have callbacks invoked as if unshared', async () => {
@@ -727,9 +737,12 @@ test.each([false, true])('Options#heartbeat, can handle case when interval is ve
   await sleep(50);
   expect(result.current.lastMessage?.data).toEqual("authorized");
 
-  await sleep(850);
-  // it does not matter is it shared mode or not, in both cases only one timer is used that means only one ping message is sent for all subscribers
-  expect(server.messages).toEqual(["token", "ping"]);
+  // The heartbeat checks every 100 ms, so the ping goes out between 800 and
+  // 900 ms after the last message: wait for it instead of guessing the moment.
+  await waitFor(() => {
+    // it does not matter is it shared mode or not, in both cases only one timer is used that means only one ping message is sent for all subscribers
+    expect(server.messages).toEqual(["token", "ping"]);
+  }, { timeout: 1500 });
   server.send("pong");
 
   expect(result.current.readyState).toBe(WebSocket.OPEN);
@@ -737,3 +750,131 @@ test.each([false, true])('Options#heartbeat, can handle case when interval is ve
 );
 
 // //TODO: Write companion tests for useSocketIO
+
+test('a socket created while its effect is being cleaned up is closed', async () => {
+  // connect turns false while the url resolves. The hook learns about it only
+  // in the render that the socket creation triggers with flushSync to report
+  // CONNECTING, and that render cleans the effect up before the cleanup has
+  // a handle on the new socket.
+  let connectNow = true;
+  const getUrl = () => new Promise<string>(resolve => {
+    setTimeout(() => {
+      connectNow = false;
+      resolve(URL);
+    }, 100);
+  });
+
+  const { result } = renderHook(() => useWebSocket(getUrl, options, connectNow));
+
+  await sleep(500);
+
+  const ws = result.current.getWebSocket();
+  expect(ws).not.toBeNull();
+  expect(ws?.readyState).toBe(ReadyState.CLOSED);
+});
+
+test('a failing url is retried for as long as the hook should connect', async () => {
+  let failures = 5;
+  const getUrl = jest.fn(() => new Promise<string>((resolve, reject) => {
+    if (failures > 0) {
+      failures--;
+      reject(new Error('No ticket'));
+    } else {
+      resolve(URL);
+    }
+  }));
+  options.retryOnError = true;
+  options.reconnectAttempts = Infinity;
+  options.reconnectInterval = 50;
+
+  const { result } = renderHook(() => useWebSocket(getUrl, options));
+
+  await server.connected;
+  await waitFor(() => expect(result.current.readyState).toBe(ReadyState.OPEN));
+  expect(getUrl).toHaveBeenCalledTimes(6);
+});
+
+test('a failing url is not requested again after unmount', async () => {
+  const getUrl = jest.fn(() => Promise.reject<string>(new Error('No ticket')));
+  options.retryOnError = true;
+  options.reconnectAttempts = Infinity;
+  options.reconnectInterval = 50;
+
+  const { unmount } = renderHook(() => useWebSocket(getUrl, options));
+
+  await sleep(200);
+  unmount();
+  const callsAtUnmount = getUrl.mock.calls.length;
+  await sleep(300);
+
+  expect(callsAtUnmount).toBeGreaterThan(1);
+  expect(getUrl).toHaveBeenCalledTimes(callsAtUnmount);
+});
+
+test('an attempt that resolves after a newer one does not take over readyState', async () => {
+  let calls = 0;
+  const getUrl = () => {
+    calls++;
+    const isStale = calls === 1;
+    return new Promise<string>(resolve => {
+      setTimeout(() => resolve(isStale ? `${URL}/stale` : URL), isStale ? 400 : 50);
+    });
+  };
+
+  const {
+    result,
+    rerender,
+  } = renderHook(({ connect }) => useWebSocket(getUrl, options, connect), {
+    initialProps: { connect: true },
+  });
+
+  rerender({ connect: false });
+  rerender({ connect: true });
+
+  await server.connected;
+  await waitFor(() => expect(result.current.readyState).toBe(ReadyState.OPEN));
+
+  // The first, cancelled attempt resolves now; any later render must still
+  // read the state of the live socket.
+  await sleep(500);
+  rerender({ connect: true });
+
+  expect(result.current.readyState).toBe(ReadyState.OPEN);
+});
+
+test('the hook closes its socket with a normal closure code', async () => {
+  const { result, unmount } = renderHook(() => useWebSocket(URL, options));
+  await server.connected;
+  const ws = result.current.getWebSocket() as WebSocket;
+  const close = jest.spyOn(ws, 'close');
+
+  unmount();
+
+  expect(close).toHaveBeenCalledWith(1000);
+});
+
+test('a closing code that browsers reject falls back to a normal closure', async () => {
+  options.defaulClosingCode = 1001;
+
+  const { result, unmount } = renderHook(() => useWebSocket(URL, options));
+  await server.connected;
+  const ws = result.current.getWebSocket() as WebSocket;
+  const close = jest.spyOn(ws, 'close');
+
+  unmount();
+
+  expect(close).toHaveBeenCalledWith(1000);
+});
+
+test('an application closing code is passed through', async () => {
+  options.defaulClosingCode = 4001;
+
+  const { result, unmount } = renderHook(() => useWebSocket(URL, options));
+  await server.connected;
+  const ws = result.current.getWebSocket() as WebSocket;
+  const close = jest.spyOn(ws, 'close');
+
+  unmount();
+
+  expect(close).toHaveBeenCalledWith(4001);
+});

@@ -24,7 +24,13 @@ export interface Options {
   skipAssert?: boolean;
   heartbeat?: boolean | HeartbeatOptions;
   disableJson?: boolean;
-  defaulClosingCode?: WebSocketClosingCode;
+  /**
+   * Close code for the connections the hook closes itself: on unmount, when
+   * `connect` turns false or the url changes. Defaults to 1000. Codes that
+   * browsers do not accept in `close()` (anything but 1000 and 3000-4999)
+   * fall back to 1000.
+   */
+  defaulClosingCode?: WebSocketClosingCode | number;
 }
 
 export type EventSourceOnly = Omit<Options, "eventSourceOptions"> &

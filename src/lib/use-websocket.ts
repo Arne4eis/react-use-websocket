@@ -87,9 +87,23 @@ export const useWebSocket = <T = unknown>(
       let removeListeners: () => void;
       let expectClose = false;
       let createOrJoin = true;
+      // The latest attempt of this effect run: an older one that resolves
+      // later has nothing left to do.
+      let attempt = 0;
 
       const start = async () => {
-        convertedUrl.current = await getUrl(url, optionsCache);
+        const currentAttempt = ++attempt;
+        const isCurrent = () => !expectClose && currentAttempt === attempt;
+
+        const nextUrl = await getUrl(url, optionsCache, 0, isCurrent);
+
+        // The effect was cleaned up or a newer attempt started while the url
+        // was resolving. The url ref is shared by all attempts and may
+        // already belong to a newer connection: overwriting it would make
+        // readyState read the state of a socket nobody uses.
+        if (!isCurrent()) return;
+
+        convertedUrl.current = nextUrl;
 
         if (convertedUrl.current === null) {
           console.error('Failed to get a valid URL. WebSocket connection aborted.');
@@ -118,7 +132,7 @@ export const useWebSocket = <T = unknown>(
         };
 
         if (createOrJoin) {
-          removeListeners = createOrJoinSocket(
+          const remove = createOrJoinSocket(
             webSocketRef,
             convertedUrl.current,
             protectedSetReadyState,
@@ -129,6 +143,18 @@ export const useWebSocket = <T = unknown>(
             lastMessageTime,
             sendMessage,
           );
+
+          // createOrJoinSocket reports CONNECTING through flushSync, and that
+          // synchronous render may clean this effect up right away (`connect`
+          // turned false, the url changed) - before `removeListeners` holds
+          // the new socket. The cleanup could not close it, and nothing
+          // else would: the socket stayed open for the life of the page.
+          if (expectClose) {
+            remove();
+            return;
+          }
+
+          removeListeners = remove;
         }
       };
 

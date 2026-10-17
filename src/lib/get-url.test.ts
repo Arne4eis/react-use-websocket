@@ -37,3 +37,20 @@ test('If query params are passed in the options, object will be converted to str
   const wsUrl = await getUrl(URL, optionRef);
   expect(wsUrl!.endsWith('?type=user&id=5')).toBe(true);
 });
+
+test('Retries of a failing url stop as soon as the connection is no longer needed', async () => {
+  optionRef.current.retryOnError = true;
+  optionRef.current.reconnectAttempts = Infinity;
+  optionRef.current.reconnectInterval = 50;
+
+  let isActive = true;
+  const failingUrl = jest.fn(() => {
+    isActive = false;
+    return Promise.reject<string>(new Error('No ticket'));
+  });
+
+  const wsUrl = await getUrl(failingUrl, optionRef, 0, () => isActive);
+
+  expect(wsUrl).toBeNull();
+  expect(failingUrl).toHaveBeenCalledTimes(1);
+});

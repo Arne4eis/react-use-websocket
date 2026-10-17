@@ -15,6 +15,7 @@ let optionRef: MutableRefObject<Options>;
 const sleep = (duration: number): Promise<void> => new Promise(resolve => setTimeout(() => resolve(), duration));
 
 beforeEach(async () => {
+  lastMessageTimeRef = { current: Date.now() };
     server = new WS('ws://localhost:1234');
     client = new WebSocket('ws://localhost:1234');
     reconnectCountRef = { current: 0 };
@@ -188,4 +189,54 @@ test('When client closes the websocket using the provided cleanup function, read
     expect(setReadyStateFn.mock.calls[1][0]).toEqual(ReadyState.CLOSING);
     expect(setReadyStateFn.mock.calls[2][0]).toEqual(ReadyState.CLOSED);
     expect(setReadyStateFn).toHaveBeenCalledTimes(3);
+})
+
+test('A failed connection schedules one reconnect, not one per event', async () => {
+    // A failed socket reports an error and then a close; with both
+    // retryOnError and shouldReconnect set each of them used to reconnect.
+    const reconnect = jest.fn();
+    optionRef.current.retryOnError = true;
+    optionRef.current.shouldReconnect = () => true;
+    optionRef.current.reconnectInterval = 100;
+
+    attachListeners(
+        client,
+        { setLastMessage: noop, setReadyState: noop },
+        optionRef,
+        reconnect,
+        reconnectCountRef,
+        lastMessageTimeRef,
+        noop,
+    );
+
+    await sleep(500);
+    server.error();
+    await sleep(500);
+
+    expect(reconnect).toHaveBeenCalledTimes(1);
+})
+
+test('A socket closed with the cleanup function neither reconnects nor reports its late close', async () => {
+    const reconnect = jest.fn();
+    const onClose = jest.fn();
+    optionRef.current.shouldReconnect = () => true;
+    optionRef.current.reconnectInterval = 100;
+    optionRef.current.onClose = onClose;
+
+    const cleanup = attachListeners(
+        client,
+        { setLastMessage: noop, setReadyState: noop },
+        optionRef,
+        reconnect,
+        reconnectCountRef,
+        lastMessageTimeRef,
+        noop,
+    );
+
+    await sleep(500);
+    cleanup();
+    await sleep(500);
+
+    expect(reconnect).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
 })

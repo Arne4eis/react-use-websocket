@@ -8,7 +8,7 @@ import {
   isEventSourceSupported,
 } from "./constants";
 import { Options, SendMessage, WebSocketLike } from "./types";
-import { assertIsWebSocket } from "./util";
+import { assertIsWebSocket, closeWebSocket } from "./util";
 
 export interface Setters {
   setLastMessage: (message: WebSocketEventMap["message"]) => void;
@@ -72,18 +72,70 @@ const bindOpenHandler = (
   };
 };
 
+/**
+ * The next reconnect attempt for one socket.
+ *
+ * A failed WebSocket reports itself twice, with an error and then with a
+ * close. With both `retryOnError` and `shouldReconnect` set, each event used
+ * to schedule an attempt of its own: two sockets were opened at once, and the
+ * listeners of the first one were lost, so nothing ever closed it. A socket
+ * now gets at most one attempt, whichever event asks first.
+ */
+interface ReconnectScheduler {
+  schedule: () => void;
+  cancel: () => void;
+}
+
+const createReconnectScheduler = (
+  optionsRef: MutableRefObject<Options>,
+  reconnect: () => void,
+  reconnectCount: MutableRefObject<number>
+): ReconnectScheduler => {
+  let reconnectTimeout: number | undefined;
+  let isScheduled = false;
+
+  return {
+    schedule: () => {
+      if (isScheduled) return;
+      isScheduled = true;
+
+      const reconnectAttempts =
+        optionsRef.current.reconnectAttempts ?? DEFAULT_RECONNECT_LIMIT;
+
+      if (reconnectCount.current >= reconnectAttempts) {
+        optionsRef.current.onReconnectStop &&
+          optionsRef.current.onReconnectStop(reconnectAttempts);
+        console.warn(`Max reconnect attempts of ${reconnectAttempts} exceeded`);
+        return;
+      }
+
+      const nextReconnectInterval =
+        typeof optionsRef.current.reconnectInterval === "function"
+          ? optionsRef.current.reconnectInterval(reconnectCount.current)
+          : optionsRef.current.reconnectInterval;
+
+      reconnectTimeout = window.setTimeout(() => {
+        reconnectCount.current++;
+        reconnect();
+      }, nextReconnectInterval ?? DEFAULT_RECONNECT_INTERVAL_MS);
+    },
+
+    cancel: () => {
+      if (reconnectTimeout !== undefined) window.clearTimeout(reconnectTimeout);
+    },
+  };
+};
+
 const bindCloseHandler = (
   webSocketInstance: WebSocketLike,
   optionsRef: MutableRefObject<Options>,
   setReadyState: Setters["setReadyState"],
-  reconnect: () => void,
-  reconnectCount: MutableRefObject<number>
+  reconnectScheduler: ReconnectScheduler
 ) => {
   if (isEventSourceSupported && webSocketInstance instanceof EventSource) {
-    return () => {};
+    return;
   }
   assertIsWebSocket(webSocketInstance, optionsRef.current.skipAssert);
-  let reconnectTimeout: number;
 
   webSocketInstance.onclose = (event: WebSocketEventMap["close"]) => {
     optionsRef.current.onClose && optionsRef.current.onClose(event);
@@ -92,38 +144,17 @@ const bindCloseHandler = (
       optionsRef.current.shouldReconnect &&
       optionsRef.current.shouldReconnect(event)
     ) {
-      const reconnectAttempts =
-        optionsRef.current.reconnectAttempts ?? DEFAULT_RECONNECT_LIMIT;
-      if (reconnectCount.current < reconnectAttempts) {
-        const nextReconnectInterval =
-          typeof optionsRef.current.reconnectInterval === "function"
-            ? optionsRef.current.reconnectInterval(reconnectCount.current)
-            : optionsRef.current.reconnectInterval;
-
-        reconnectTimeout = window.setTimeout(() => {
-          reconnectCount.current++;
-          reconnect();
-        }, nextReconnectInterval ?? DEFAULT_RECONNECT_INTERVAL_MS);
-      } else {
-        optionsRef.current.onReconnectStop &&
-          optionsRef.current.onReconnectStop(reconnectAttempts);
-        console.warn(`Max reconnect attempts of ${reconnectAttempts} exceeded`);
-      }
+      reconnectScheduler.schedule();
     }
   };
-
-  return () => reconnectTimeout && window.clearTimeout(reconnectTimeout);
 };
 
 const bindErrorHandler = (
   webSocketInstance: WebSocketLike,
   optionsRef: MutableRefObject<Options>,
   setReadyState: Setters["setReadyState"],
-  reconnect: () => void,
-  reconnectCount: MutableRefObject<number>
+  reconnectScheduler: ReconnectScheduler
 ) => {
-  let reconnectTimeout: number;
-
   webSocketInstance.onerror = (error: WebSocketEventMap["error"]) => {
     optionsRef.current.onError && optionsRef.current.onError(error);
     if (isEventSourceSupported && webSocketInstance instanceof EventSource) {
@@ -140,32 +171,9 @@ const bindErrorHandler = (
     }
 
     if (optionsRef.current.retryOnError) {
-      if (
-        reconnectCount.current <
-        (optionsRef.current.reconnectAttempts ?? DEFAULT_RECONNECT_LIMIT)
-      ) {
-        const nextReconnectInterval =
-          typeof optionsRef.current.reconnectInterval === "function"
-            ? optionsRef.current.reconnectInterval(reconnectCount.current)
-            : optionsRef.current.reconnectInterval;
-
-        reconnectTimeout = window.setTimeout(() => {
-          reconnectCount.current++;
-          reconnect();
-        }, nextReconnectInterval ?? DEFAULT_RECONNECT_INTERVAL_MS);
-      } else {
-        optionsRef.current.onReconnectStop &&
-          optionsRef.current.onReconnectStop(
-            optionsRef.current.reconnectAttempts as number
-          );
-        console.warn(
-          `Max reconnect attempts of ${optionsRef.current.reconnectAttempts} exceeded`
-        );
-      }
+      reconnectScheduler.schedule();
     }
   };
-
-  return () => reconnectTimeout && window.clearTimeout(reconnectTimeout);
 };
 
 export const attachListeners = (
@@ -180,12 +188,16 @@ export const attachListeners = (
   const { setLastMessage, setReadyState } = setters;
 
   let interval: number;
-  let cancelReconnectOnClose: () => void;
-  let cancelReconnectOnError: () => void;
 
   if (optionsRef.current.fromSocketIO) {
     interval = setUpSocketIOPing(sendMessage);
   }
+
+  const reconnectScheduler = createReconnectScheduler(
+    optionsRef,
+    reconnect,
+    reconnectCount
+  );
 
   bindMessageHandler(
     webSocketInstance,
@@ -202,27 +214,38 @@ export const attachListeners = (
     lastMessageTime
   );
 
-  cancelReconnectOnClose = bindCloseHandler(
+  bindCloseHandler(
     webSocketInstance,
     optionsRef,
     setReadyState,
-    reconnect,
-    reconnectCount
+    reconnectScheduler
   );
 
-  cancelReconnectOnError = bindErrorHandler(
+  bindErrorHandler(
     webSocketInstance,
     optionsRef,
     setReadyState,
-    reconnect,
-    reconnectCount
+    reconnectScheduler
   );
 
   return () => {
     setReadyState(ReadyState.CLOSING);
-    cancelReconnectOnClose();
-    cancelReconnectOnError();
-    webSocketInstance.close(optionsRef.current.defaulClosingCode);
+    reconnectScheduler.cancel();
+
+    // The hook closes this socket itself, so whatever it reports afterwards
+    // (a close event arriving seconds later, an error on the way down) is
+    // not a lost connection: it must neither schedule a reconnect nor reach
+    // the callbacks of a connection that has already been replaced. Only
+    // the state follows the socket down to CLOSED.
+    webSocketInstance.onopen = null;
+    webSocketInstance.onmessage = null;
+    webSocketInstance.onerror = null;
+    if (!(isEventSourceSupported && webSocketInstance instanceof EventSource)) {
+      (webSocketInstance as WebSocket).onclose = () =>
+        setReadyState(ReadyState.CLOSED);
+    }
+
+    closeWebSocket(webSocketInstance, optionsRef.current.defaulClosingCode);
     if (interval) clearInterval(interval);
   };
 };
