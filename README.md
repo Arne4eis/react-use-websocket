@@ -10,6 +10,30 @@ React Hook designed to provide robust WebSocket integrations to your React Compo
 
 Pull requests welcomed!
 
+## Changes in this fork
+
+- **Normal closure code.** Connections the hook closes itself (on unmount, when `connect` turns false or the url changes) are closed with 1000. Upstream calls `close()` without a code, and servers see 1005 (no status). `defaulClosingCode` sets another code; codes that browsers reject in `close()` (anything but 1000 and 3000-4999) fall back to 1000 instead of throwing and leaving the socket open.
+- **No socket left behind.** Creating a socket reports CONNECTING through `flushSync`. When that synchronous render cleaned the effect up (`connect` turned false, the url changed), the cleanup had no handle on the new socket yet, and the socket stayed open for the life of the page. Such a socket is now closed at once.
+- **Stale attempts stay quiet.** An attempt whose url resolves after the effect was cleaned up, or after a newer attempt started, no longer overwrites the url `readyState` is read for.
+- **One reconnect per failed socket.** With both `retryOnError` and `shouldReconnect` set, the error and the close of a failed socket each scheduled an attempt of its own.
+- **Sockets closed by the hook stay quiet.** Their late close events no longer call `onClose` or schedule a reconnect.
+- **Url retries can be cancelled.** A failing url function (a request for a one-time ticket, for example) is retried with `retryOnError` as before, and the retries stop as soon as the component unmounts or stops connecting, so `reconnectAttempts: Infinity` is safe.
+
+Options for a socket whose url carries a one-time ticket:
+
+```js
+const { readyState } = useWebSocket(
+  getUrlWithTicket, // async: requests a new ticket for every connection
+  {
+    retryOnError: true, // a failed ticket request is retried too
+    shouldReconnect: () => true,
+    reconnectAttempts: Infinity,
+    reconnectInterval: (attempt) => Math.min(1000 * 2 ** attempt, 10000),
+  },
+  shouldConnect,
+);
+```
+
 ## New in 4.0.0
 
 - `react-use-websocket` now supports (and depends on) React 18. If you are not ready to upgrade to React 18, please install version `3.0.0`:
