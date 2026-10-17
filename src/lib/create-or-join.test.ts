@@ -16,6 +16,7 @@ let optionRef: MutableRefObject<Options>;
 let noopRef: MutableRefObject<typeof noop>;
 
 beforeEach(async () => {
+  lastMessageTimeRef = { current: Date.now() };
   server = new WS(URL);
   clientRef = { current: new WebSocket(URL) };
   reconnectCountRef = { current: 0 };

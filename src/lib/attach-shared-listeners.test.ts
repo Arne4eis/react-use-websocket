@@ -19,6 +19,7 @@ let lastMessageTimeRef: MutableRefObject<number>;
 let optionRef: MutableRefObject<Options>;
 
 beforeEach(async () => {
+  lastMessageTimeRef = { current: Date.now() };
   server = new WS(URL);
   client = new WebSocket(URL);
   reconnectCountRef = { current: 0 };

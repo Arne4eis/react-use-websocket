@@ -15,6 +15,7 @@ let optionRef: MutableRefObject<Options>;
 const sleep = (duration: number): Promise<void> => new Promise(resolve => setTimeout(() => resolve(), duration));
 
 beforeEach(async () => {
+  lastMessageTimeRef = { current: Date.now() };
     server = new WS('ws://localhost:1234');
     client = new WebSocket('ws://localhost:1234');
     reconnectCountRef = { current: 0 };

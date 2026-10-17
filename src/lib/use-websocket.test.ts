@@ -137,9 +137,11 @@ test('a function-promise based url stops retrying if it has exceeded reconnectAt
 
   expect(result.current.readyState).toEqual(ReadyState.UNINSTANTIATED);
   rerender({ initialValue: true });
-  await sleep(1000);
+  // Retries fail at about 500 and 1000 ms: check in between, not at the
+  // moment the last one gives up.
+  await sleep(700);
   expect(result.current.readyState).toEqual(ReadyState.CONNECTING);
-  await sleep(1000);
+  await sleep(1300);
   await expect(result.current.readyState).toEqual(ReadyState.CLOSED);
   expect(options.onReconnectStop).toHaveBeenCalled();
 });
@@ -333,7 +335,11 @@ test('shared=false websocket can re-connect after timeout', async () => {
 
   await server.connected;
   server.send('pong');
-  expect(component1.current.getWebSocket()?.readyState).toBe(WebSocket.OPEN);
+  // Without pongs the heartbeat keeps dropping the connection every 100 ms,
+  // so a single check may land in the middle of a reconnect.
+  await waitFor(() => {
+    expect(component1.current.getWebSocket()?.readyState).toBe(WebSocket.OPEN);
+  });
 });
 
 test('shared=true websocket can re-connect after timeout', async () => {
@@ -360,7 +366,11 @@ test('shared=true websocket can re-connect after timeout', async () => {
 
   await server.connected;
   server.send('pong');
-  expect(component1.current.getWebSocket()?.readyState).toBe(WebSocket.OPEN);
+  // Without pongs the heartbeat keeps dropping the connection every 100 ms,
+  // so a single check may land in the middle of a reconnect.
+  await waitFor(() => {
+    expect(component1.current.getWebSocket()?.readyState).toBe(WebSocket.OPEN);
+  });
 });
 
 test('shared websockets each have callbacks invoked as if unshared', async () => {
